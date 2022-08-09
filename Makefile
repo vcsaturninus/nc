@@ -12,11 +12,6 @@ OUT_DIR:=out
 
 VALGRIND_REPORT:=valgrind.txt
 
-# tests
-TESTS_DIR:=tests/
-C_TESTS_SRC:=tests.c
-C_TESTS_OUT:=tests
-
 .PHONY: all clean
 
 all: clean compile
@@ -30,11 +25,5 @@ $(OUT_DIR)/%.o: src/%.c
 
 compile: $(addprefix $(OUT_DIR)/, $(notdir $(SRC:.c=.o)))
 	$(CC) $(CFLAGS) $(CPPFLAGS) $^ -o $(OUT_DIR)/$(OUT)
-
-grind: clean compile
-	valgrind --leak-check=full --show-leak-kinds=all \
-        --track-origins=yes --verbose \
-        --log-file=$(VALGRIND_REPORT) \
-        ./$(OUT_DIR)/$(C_TESTS_OUT)
 
 
