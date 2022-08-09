@@ -3,13 +3,14 @@ ifdef DEBUG_MODE
  CFLAGS += -g
 endif
 
-SRC:= src/nc.c
 CPPFLAGS:=-Isrc 
 CPPFLAGS += -D_POSIX_C_SOURCE=200112L   # struct addrinfo, getopt
-OUT:=nc
 
-VALGRIND_REPORT:= valgrind.txt
+SRC:=$(wildcard src/*.c)
+OUT:=nc
 OUT_DIR:=out
+
+VALGRIND_REPORT:=valgrind.txt
 
 # tests
 TESTS_DIR:=tests/
@@ -18,18 +19,19 @@ C_TESTS_OUT:=tests
 
 .PHONY: all clean
 
-all: clean paths compile
-
-paths:
-	mkdir -p $(OUT_DIR)
+all: clean compile
 
 clean:
 	rm -rf $(OUT_DIR) $(VALGRIND_REPORT)
+	mkdir -p $(OUT_DIR)
 
-compile:
-	$(CC) $(CFLAGS) $(CPPFLAGS) $(SRC) -o $(OUT_DIR)/$(OUT)
+$(OUT_DIR)/%.o: src/%.c
+	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
 
-grind: clean paths compile
+compile: $(addprefix $(OUT_DIR)/, $(notdir $(SRC:.c=.o)))
+	$(CC) $(CFLAGS) $(CPPFLAGS) $^ -o $(OUT_DIR)/$(OUT)
+
+grind: clean compile
 	valgrind --leak-check=full --show-leak-kinds=all \
         --track-origins=yes --verbose \
         --log-file=$(VALGRIND_REPORT) \
