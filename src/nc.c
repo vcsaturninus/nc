@@ -10,6 +10,13 @@
 #include <arpa/inet.h>   /* inet_pton */
 #include <sys/un.h>      /* struct sockaddr_un */
 #include <errno.h>
+#include <assert.h>
+#include <limits.h>      /* SSIZE_MAX */
+
+#ifdef USE_TLS           /* encrypt internet sockets with TLS */
+#include <signal.h>
+#include "tls.h"
+#endif
 
 /*============
   -- Macros --
@@ -42,7 +49,12 @@ enum {READ_FAIL=-1, WRITE_FAIL=-2};
 void show_usage(char **argv);
 
 /* read bytes from src and write to dst until EOF or error */
-int transfer(int src, int dst);
+int transfer(int src, int dst, int buffsz);
+
+#ifdef USE_TLS
+int ssl_transfer(int src, int dst, int buffsz, SSL *ssl, int dir);
+enum {FROM_SSL=0, TO_SSL=1};
+#endif
 
 
 
@@ -57,10 +69,21 @@ int main(int argc, char *argv[]){
     char *file = NULL;   /* optionally specified input/output file */
     UNUSED(file);
 
+#ifdef USE_TLS
+    int TLS_ENCRYPT = 1;      /* flag to enable TLS encryption */
+    UNUSED(TLS_ENCRYPT);
+    SSL_CTX *ssl_ctx = NULL;
+    SSL *ssl = NULL;
+#endif
+
     /*==================
      * -- CLI parsing --
      *=================*/
+#ifdef USE_TLS
+    const char *optstring = "ef:hlu";
+#else
     const char *optstring = "f:hlu";
+#endif
     char opt = 0;
 
     extern int optind;
@@ -68,12 +91,17 @@ int main(int argc, char *argv[]){
 
     while ((opt = getopt(argc, argv, optstring)) != -1){
         switch(opt){
-            case 'l':
-                LISTENER=1;
+#ifdef USE_TLS
+            case 'e':
+                TLS_ENCRYPT = 1;
                 break;
-
+#endif
             case 'f':
                 file = optarg;
+                break;
+
+            case 'l':
+                LISTENER=1;
                 break;
 
             case 'u':
@@ -92,6 +120,13 @@ int main(int argc, char *argv[]){
         }
     }
 
+    /* validate cli */
+#ifdef USE_TLS
+    if (UNIX_DOMAIN && USE_TLS){
+        exit_print("Invalid cli configuration: encryption can only be used with Internet sockets\n");
+    }
+#endif
+
     /* where to read and write from:
        1) client reads from stdin or file and sends to server via socket
        2) server reads from socket and writes to stdout or file */
@@ -108,6 +143,7 @@ int main(int argc, char *argv[]){
         }
     }
 
+
     /*====================
      * -- Socket logic --
      *===================*/
@@ -118,7 +154,7 @@ int main(int argc, char *argv[]){
         }
         char *SOCK_PATH = argv[optind];
 
-        if (( sd = socket(AF_UNIX, SOCK_DGRAM, 0)) == -1){
+        if (( sd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1){
             exit_perror("Failed to create Unix Domain socket");
         }
 
@@ -135,14 +171,25 @@ int main(int argc, char *argv[]){
             if (bind(sd, (struct sockaddr *)&unaddr, sizeof(struct sockaddr_un)) == -1){
                 exit_perror("Failed to bind to socket");
             }
-            rc = transfer(sd, output);
+
+            if (listen(sd, BACKLOG_SIZE) == -1){
+                exit_perror("Failed to listen");
+            }
+
+            int connsock = accept(sd, NULL, NULL);
+            if (connsock == -1){
+                exit_perror("accept() error");
+            }
+
+            rc = transfer(connsock, output, BUFFER_SIZE);
+			close(connsock);
         }
         else{
             // connect so we can use write instead of send
             if (connect(sd, (struct sockaddr *)&unaddr, sizeof(struct sockaddr_un)) == -1){
                 exit_perror("Failed to connect");
             }
-            rc = transfer(input, sd);
+            rc = transfer(input, sd, BUFFER_SIZE);
         }
 
         if (rc == READ_FAIL){
@@ -200,6 +247,10 @@ int main(int argc, char *argv[]){
             exit_print("Failed to set up socket. FATAL.\n");
         }
 
+#ifdef USE_TLS
+        if (TLS_ENCRYPT) ssl_ctx = get_ssl_ctx(false);
+#endif
+
         if (LISTENER){ /* server/receiver */
             if (listen(sd, BACKLOG_SIZE) == -1){
                 exit_print("Failed to listen on socket. FATAL.\n");
@@ -208,12 +259,47 @@ int main(int argc, char *argv[]){
             socklen_t addrlen = sizeof(struct sockaddr_storage);
             struct sockaddr_storage peer_addr = {0};
             int connsock = accept(sd, (struct sockaddr *)&peer_addr, &addrlen);
-
             if (connsock == -1){
                 exit_perror("accept() error");
             }
+#ifdef USE_TLS
+            if (TLS_ENCRYPT){
+                if (signal(SIGPIPE,SIG_IGN) == SIG_ERR){
+                    perror("Failed to change signal disposition");
+                    exit(EXIT_FAILURE);
+                }
+                configure_ssl_ctx(true, ssl_ctx);
+                ssl = SSL_new(ssl_ctx);
+                SSL_set_fd(ssl, connsock);
+                
+                fprintf(stderr, "in ssl accept\n");
+                if (SSL_accept(ssl) != 1){
+                    fprintf(stderr, "Failed to accept() TLS conection request\n");
+                    ERR_print_errors_fp(stderr);
+                    exit(EXIT_FAILURE);
+                }
+                
+                fprintf(stderr, "about to call ssl_transfer\n");
+                rc = ssl_transfer(connsock, output, BUFFER_SIZE, ssl, FROM_SSL);
 
-            rc = transfer(connsock, output);
+                SSL_shutdown(ssl);
+                SSL_free(ssl);
+                SSL_CTX_free(ssl_ctx);
+
+                if (rc < 0){
+                    ERR_print_errors_fp(stderr);
+                    exit_print("failed to read ssl msg\n");
+                }
+            }
+            else
+            {
+#else
+            rc = transfer(connsock, output, BUFFER_SIZE);
+#endif /* USE_TLS */
+#ifdef USE_TLS
+            }   /* ! TLS_ENCRYPT */
+#endif
+			close(connsock);
         } /* server/receiver */
 
         else {  /* client, sender */
@@ -243,14 +329,48 @@ int main(int argc, char *argv[]){
                 exit_perror("Failed to establish connection with peer");
             }
 
-            rc = transfer(input, sd);
+#ifdef USE_TLS
+            if (TLS_ENCRYPT){
+                configure_ssl_ctx(false, ssl_ctx);
+                ssl = SSL_new(ssl_ctx);
+                SSL_set_fd(ssl, sd);
+                SSL_set_tlsext_host_name(ssl, HOST_ADDR);
+                SSL_set1_host(ssl, HOST_ADDR);
+
+                if (SSL_connect(ssl) != 1){
+                    fprintf(stderr, "Failure when initiating TLS handshake\n");
+                    ERR_print_errors_fp(stderr);
+                    exit(EXIT_FAILURE);
+                }
+
+                rc = ssl_transfer(input, sd, BUFFER_SIZE, ssl, TO_SSL);
+                /* only shut down AFTER server has sent its tickets and whatever else */
+                
+                SSL_shutdown(ssl);
+                SSL_free(ssl);
+                SSL_CTX_free(ssl_ctx);
+
+                if (rc < 0){
+                    ERR_print_errors_fp(stderr);
+                    exit_print("failed to write ssl msg\n");
+                }
+            }
+            else{
+#else
+            rc = transfer(input, sd, BUFFER_SIZE);
+#endif /* USE_TLS */
+#ifdef USE_TLS
+            } /* !TLS_ENCRYPT */
+#endif
         } /* client/sender */
 
+#ifndef USE_TLS
         if (rc == READ_FAIL){
             exit_perror("Read failure");
         }else if (rc == WRITE_FAIL){
             exit_perror("Write failure");
         }
+#endif
     } /* Internet Domain (IPv4/v6) */
 
     if (file && LISTENER)  close(output);  /* server */
@@ -268,7 +388,13 @@ void show_usage(char **argv){
 " %s\n"
 "   [-h]\n"
 " \nIPv4/IPv6:\n"
+
+#ifdef USE_TLS
+"   [-f FILE] [-l] [-e] <ADDRESS> <PORT>\n"
+#else
 "   [-f FILE] [-l] <ADDRESS> <PORT>\n"
+#endif
+
 " Unix Domain Sockets:\n"
 "   [-f FILE] [-l] <UDS PATH> \n",
     argv[0]);
@@ -276,20 +402,94 @@ void show_usage(char **argv){
     fflush(stdout);
 }
 
-int transfer(int src, int dst){
-    int16_t bytes_read = 0;
-    char buff[BUFFER_SIZE] = {0};
+
+int full_write(int dst, unsigned char *src, int nbytes);
+
+/*
+ * If read returns:
+ * a) -1, trasnfer() considers it to have failed
+ * b) 0, transfer() considers it to have succeeded but
+ *    the internal loop never enters; this is when read
+ *    returns EOF.
+ * c) a certain numbers of bytes that have been read;
+ *    In this case the internal loop is entered and write()
+ *    will attempt to write that number of bytes to dst.
+ *
+ * The number of bytes read by `read()` will be written
+ * by `write()` in an internal loop, as described above.
+ *
+ * The full_write() wrapper is used rather than write() in
+ * order to attempt recovery from partial writes.
+ */
+int transfer(int src, int dst, int buffsz){
+    unsigned char buff[buffsz];
+    int16_t bytes_read    = 0;
+	assert(buffsz <= SSIZE_MAX); /* else implementation-defined */
 
     while ( (bytes_read = read(src, buff, BUFFER_SIZE)) ){
         if (bytes_read == -1) return READ_FAIL;
-
-        if (write(dst, buff, bytes_read) != bytes_read){
-            // todo: deal with case where errno is simply EINT for partial writes
-            return WRITE_FAIL;
-        } /* write */
-    } /* while loop */
+		if (full_write(dst, buff, bytes_read)){
+			return WRITE_FAIL;			
+		}
+    } /* while read */
 
     return 0;
 }
 
+#ifdef USE_TLS
+// dir : 0=from ssl, 1= to ssl
+int ssl_transfer(int src, int dst, int buffsz, SSL *ssl, int dir){
+    unsigned char buff[buffsz];
+    int16_t bytes_read    = 0;
+	assert(buffsz <= SSIZE_MAX); /* else implementation-defined */
+    
+    if (dir == 0){
+        fprintf(stderr, "FROMSSL!\n");
+        while ( (bytes_read = SSL_read(ssl, buff, BUFFER_SIZE)) ){
+            if (bytes_read == -1) return READ_FAIL;
+            if (full_write(dst, buff, bytes_read)){
+                return WRITE_FAIL;			
+            }
+        } /* while read */
+    }
+    else if(dir == 1){
+        fprintf(stderr, "TOSSL!\n");
+        while ( (bytes_read = read(src, buff, BUFFER_SIZE)) ){
+            if (bytes_read == -1) return READ_FAIL;
+            if (SSL_write(ssl, buff, bytes_read) <= 0){
+            // if (SSL_write(ssl, buff, bytes_read)){
+                return WRITE_FAIL;
+            }
+        } /* while read */
+    }
+
+    return 0;
+}
+
+#endif
+
+
+
+
+int full_write(int dst, unsigned char *src, int nbytes){
+	int tries    = 0;
+	int max_tries = 5;
+	int to_write = nbytes;
+	int bytes_written = 0;
+	
+	while(to_write){ /* writing 0 bytes is implementation defined, so do not */
+		bytes_written = write(dst, src, to_write);
+		if (tries == max_tries) return WRITE_FAIL;
+		if (bytes_written == -1){
+			if (errno==EINTR || errno==EAGAIN || errno==EWOULDBLOCK){
+				++tries; continue;
+			} else return WRITE_FAIL;
+		};
+		src += bytes_written;
+		to_write -= bytes_written;
+		tries = 0;  /* reset tries */
+	} /* while write */
+
+	return 0;
+}
 

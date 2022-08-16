@@ -1,10 +1,17 @@
-CFLAGS:= -Wall -Wpedantic -std=c99 -Werror -O3
+CFLAGS += -Wall -Wpedantic -std=c99 -Werror -O3
 ifdef DEBUG_MODE
  CFLAGS += -g
 endif
 
-CPPFLAGS:=-Isrc 
+CPPFLAGS += -Isrc 
 CPPFLAGS += -D_POSIX_C_SOURCE=200112L   # struct addrinfo, getopt
+
+ifdef USE_TLS
+CPPFLAGS += -DUSE_TLS
+LDFLAGS  += -lssl -lcrypto
+endif
+
+$(info LDFLAGS is $(LDFLAGS))
 
 SRC:=$(wildcard src/*.c)
 OUT:=nc
@@ -24,6 +31,6 @@ $(OUT_DIR)/%.o: src/%.c
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
 
 compile: $(addprefix $(OUT_DIR)/, $(notdir $(SRC:.c=.o)))
-	$(CC) $(CFLAGS) $(CPPFLAGS) $^ -o $(OUT_DIR)/$(OUT)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $^ $(LDFLAGS) -o $(OUT_DIR)/$(OUT)
 
 
