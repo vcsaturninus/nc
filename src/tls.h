@@ -5,17 +5,16 @@
 #include <stdlib.h>  /* EXIT_FAILURE etc */
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/x509.h>   /* X509_get_default_cert_{file,dir} */
 
-/*
-#define OPENSSL_CERT      "/etc/openssl/cert.pem"
+
 #define OPENSSL_CERT_TYPE SSL_FILETYPE_PEM
-#define OPENSSL_PRIV_KEY  "/etc/openssl/key.pem"
-*/
 
-#define OPENSSL_CERT      "/home/vcsaturninus/common/docs/software_apis/openssl/scert.pem"
-#define OPENSSL_CERT_TYPE SSL_FILETYPE_PEM
-#define OPENSSL_PRIV_KEY  "/home/vcsaturninus/common/docs/software_apis/openssl/skey.pem"
-
+/* authentication can happen either through certificate exchange
+ * or via pre-shared key (PSK) */
+extern char *CERT_PATH;    
+extern char *PRIV_KEY_PATH;
+extern char *PSK_PATH;     
 
 SSL_CTX *get_ssl_ctx(bool srv);
 void configure_ssl_ctx(bool srv, SSL_CTX *ctx);
