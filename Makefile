@@ -11,8 +11,6 @@ CPPFLAGS += -DUSE_TLS
 LDFLAGS  += -lssl -lcrypto
 endif
 
-$(info LDFLAGS is $(LDFLAGS))
-
 SRC:=$(wildcard src/*.c)
 OUT:=nc
 OUT_DIR:=out

@@ -1,3 +1,7 @@
+#include <assert.h>
+#include <errno.h>
+#include <limits.h>      /* SSIZE_MAX */
+#include <getopt.h>      /* getopt_long() */
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>      /* exit() */
@@ -9,12 +13,10 @@
 #include <sys/stat.h>    /* mode_t constants */
 #include <arpa/inet.h>   /* inet_pton */
 #include <sys/un.h>      /* struct sockaddr_un */
-#include <errno.h>
-#include <assert.h>
-#include <limits.h>      /* SSIZE_MAX */
+
 
 #ifdef USE_TLS           /* encrypt internet sockets with TLS */
-#include <signal.h>
+#include <signal.h>      /* to ignore SIGPIPE */
 #include "tls.h"
 #endif
 
@@ -32,10 +34,10 @@
 #define exit_print(...) do{ fprintf(stderr, __VA_ARGS__); exit(EXIT_FAILURE); } while(0);
 
 /* Size of accept() backlog */
-#define BACKLOG_SIZE 10
+#define BACKLOG_SIZE 1
 
 /* buffer size for connect utility function */
-#define BUFFER_SIZE 8192  /* 2^13; large buffer to speed up transfer */
+#define BUFFER_SIZE 8192  /* 2^13; large buffer to speed up byte transfer */
 
 
 /*===================
@@ -63,37 +65,75 @@ int main(int argc, char *argv[]){
     int rc = 0;          /* used to store the return code of various functions */
     int sd = 0;          /* socket descriptor */
 
-    int LISTENER = 0;    /* flag for running in receiver/server mode */
-    int UNIX_DOMAIN = 0; /* flag to use unix domain sockets */
+    static int LISTENER = 0;    /* flag for running in receiver/server mode */
+    static int UNIX_DOMAIN = 0; /* flag to use unix domain sockets */
 
     char *file = NULL;   /* optionally specified input/output file */
     UNUSED(file);
 
 #ifdef USE_TLS
-    int TLS_ENCRYPT = 1;      /* flag to enable TLS encryption */
-    UNUSED(TLS_ENCRYPT);
+    static int TLS_ENCRYPT = 0;         /* flag to enable TLS encryption */
+    static int PSK_MODE    = 0;
+    static int CERT_MODE   = 0;
+
+    extern char *CERT_PATH;      /* externs defined in tls.c */
+    extern char *PRIV_KEY_PATH;
+    extern char *PSK_PATH;
+
     SSL_CTX *ssl_ctx = NULL;
-    SSL *ssl = NULL;
+    SSL     *ssl     = NULL;
+	printf("openssl version = %lx\n", OPENSSL_VERSION_NUMBER);
 #endif
 
     /*==================
      * -- CLI parsing --
      *=================*/
+
 #ifdef USE_TLS
-    const char *optstring = "ef:hlu";
+    const char *optstring = "ec:k:p:f:hlu";
 #else
     const char *optstring = "f:hlu";
 #endif
-    char opt = 0;
 
-    extern int optind;
+    static struct option longopts[] = {
+#ifdef USE_TLS
+    {"encrypt", no_argument, NULL, 'e'},
+    {"cert", required_argument, NULL, 'c'},
+    {"key", required_argument, NULL, 'k'},
+    {"psk", required_argument, NULL, 'p'},
+#endif
+    {"file", required_argument, NULL, 'f'},
+    {"listen", no_argument, &LISTENER, 1},
+    {"help", no_argument, NULL, 'h'},
+    {"unix", no_argument, &UNIX_DOMAIN, 1},
+    {0,0,0,0}
+    };
+
+    static char opt   = 0;
+    static int optidx = 0;
     extern char *optarg;
+    extern int   optopt;
 
-    while ((opt = getopt(argc, argv, optstring)) != -1){
+    while ((opt = getopt_long(argc, argv, optstring, longopts, &optidx)) != -1){
         switch(opt){
 #ifdef USE_TLS
             case 'e':
                 TLS_ENCRYPT = 1;
+                break;
+
+            case 'c':
+                CERT_PATH = optarg;
+                CERT_MODE = 1;
+                break;
+
+            case 'k':
+                PRIV_KEY_PATH = optarg;
+                CERT_MODE = 1;
+                break;
+
+            case 'p':
+                PSK_PATH = optarg;
+                PSK_MODE = 1;
                 break;
 #endif
             case 'f':
@@ -120,11 +160,27 @@ int main(int argc, char *argv[]){
         }
     }
 
-    /* validate cli */
 #ifdef USE_TLS
-    if (UNIX_DOMAIN && USE_TLS){
+    /* validate cli */
+    if (UNIX_DOMAIN && TLS_ENCRYPT){
         exit_print("Invalid cli configuration: encryption can only be used with Internet sockets\n");
     }
+
+    if (PSK_MODE && CERT_MODE){
+        exit_print("Invalid cli configuration: certificate and PSK modes are mutually exclusive\n");
+    }
+
+    if (CERT_MODE && (!PRIV_KEY_PATH || !CERT_PATH)){
+        exit_print("Invalid cli configuration: certificate mode requires certificate and private key\n");
+    }
+
+    if (TLS_ENCRYPT && !(CERT_MODE || PSK_MODE )){
+        exit_print("Invalid cli configuration: TLS mode (-e) requires either certificate or PSK mode\n");
+    }
+	
+	if (TLS_ENCRYPT){
+	    SSL_library_init();
+	}
 #endif
 
     /* where to read and write from:
@@ -247,10 +303,6 @@ int main(int argc, char *argv[]){
             exit_print("Failed to set up socket. FATAL.\n");
         }
 
-#ifdef USE_TLS
-        if (TLS_ENCRYPT) ssl_ctx = get_ssl_ctx(false);
-#endif
-
         if (LISTENER){ /* server/receiver */
             if (listen(sd, BACKLOG_SIZE) == -1){
                 exit_print("Failed to listen on socket. FATAL.\n");
@@ -264,6 +316,9 @@ int main(int argc, char *argv[]){
             }
 #ifdef USE_TLS
             if (TLS_ENCRYPT){
+                puts("tls encrypt");
+				ssl_ctx = get_ssl_ctx(true);
+
                 if (signal(SIGPIPE,SIG_IGN) == SIG_ERR){
                     perror("Failed to change signal disposition");
                     exit(EXIT_FAILURE);
@@ -293,9 +348,9 @@ int main(int argc, char *argv[]){
             }
             else
             {
-#else
-            rc = transfer(connsock, output, BUFFER_SIZE);
 #endif /* USE_TLS */
+            printf("no tls encrypt\n");
+            rc = transfer(connsock, output, BUFFER_SIZE);
 #ifdef USE_TLS
             }   /* ! TLS_ENCRYPT */
 #endif
@@ -331,11 +386,15 @@ int main(int argc, char *argv[]){
 
 #ifdef USE_TLS
             if (TLS_ENCRYPT){
+                puts("tls encrypt");
+				ssl_ctx = get_ssl_ctx(false);
                 configure_ssl_ctx(false, ssl_ctx);
                 ssl = SSL_new(ssl_ctx);
                 SSL_set_fd(ssl, sd);
                 SSL_set_tlsext_host_name(ssl, HOST_ADDR);
-                SSL_set1_host(ssl, HOST_ADDR);
+                //SSL_set_tlsext_host_name(ssl, "www.tarpian.com");
+				//SSL_set1_host(ssl, HOST_ADDR);   /*comment out to disable hostname checking*/
+                //SSL_set1_host(ssl, "www.tarpian.com");
 
                 if (SSL_connect(ssl) != 1){
                     fprintf(stderr, "Failure when initiating TLS handshake\n");
@@ -356,9 +415,8 @@ int main(int argc, char *argv[]){
                 }
             }
             else{
-#else
-            rc = transfer(input, sd, BUFFER_SIZE);
 #endif /* USE_TLS */
+            rc = transfer(input, sd, BUFFER_SIZE);
 #ifdef USE_TLS
             } /* !TLS_ENCRYPT */
 #endif
@@ -386,11 +444,14 @@ int main(int argc, char *argv[]){
 void show_usage(char **argv){
     printf(
 " %s\n"
-"   [-h]\n"
+"   [-h|--help]\n"
 " \nIPv4/IPv6:\n"
 
 #ifdef USE_TLS
-"   [-f FILE] [-l] [-e] <ADDRESS> <PORT>\n"
+"   [-f|--file FILE] [-l|--listen] [-e|--encrypt] <ADDRESS> <PORT>\n"
+"    -c|--cert CERT_PATH\n"
+"    -k|--key KEY_PATH\n"
+"    -p|--psk PSK_PATH\n"
 #else
 "   [-f FILE] [-l] <ADDRESS> <PORT>\n"
 #endif
