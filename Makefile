@@ -12,23 +12,25 @@ LDFLAGS  += -lssl -lcrypto
 endif
 
 SRC:=$(wildcard src/*.c)
-OUT:=nc
+HEADERS:=$(wildcars src/*.h)
+OUT_BIN:=nc
 OUT_DIR:=out
 
 VALGRIND_REPORT:=valgrind.txt
 
-.PHONY: all clean
 
-all: clean compile
+.PHONY: all clean compile
+
+all: compile
 
 clean:
 	rm -rf $(OUT_DIR) $(VALGRIND_REPORT)
 	mkdir -p $(OUT_DIR)
 
-$(OUT_DIR)/%.o: src/%.c
+$(OUT_DIR)/%.o: src/%.c $(HEADERS)
 	$(CC) $(CFLAGS) $(CPPFLAGS) -c -o $@ $<
 
 compile: $(addprefix $(OUT_DIR)/, $(notdir $(SRC:.c=.o)))
-	$(CC) $(CFLAGS) $(CPPFLAGS) $^ $(LDFLAGS) -o $(OUT_DIR)/$(OUT)
+	$(CC) $(CFLAGS) $(CPPFLAGS) $^ $(LDFLAGS) -o $(OUT_DIR)/$(OUT_BIN)
 
 
