@@ -23,7 +23,7 @@ appear:
 └─$ ./out/nc -h
  ./out/nc
 SYNOPSYS:
-  IPv4/IPv6:           [-hdel][-f FILE][[--noauth]|[-c CERT][-k KEY]|[-p PSK][--psk-from-file]] <ADDRESS> <PORT>
+  IPv4/IPv6:           [-hdel][-f FILE][[-c CERT][-k KEY][--noverify]|[-p PSK][--psk-from-file]] <ADDRESS> <PORT>
   Unix Domain Sockets: -u [-hdl][-f FILE] <UDS PATH>
 
 OPTIONS:
@@ -37,7 +37,7 @@ OPTIONS:
  -k|--key KEY_PATH     indicate private key associated with the certificate specified
  -p|--psk PSK          use specified PSK for TLS authentication
     --psk-from-file    the PSK argument to -p is not the psk itself but a file containing the psk
-    --noauth           use TLS encryption but do NOT authenticate via certificate or PSK
+    --noverify         skip verification of the certificate presented by the server; client need not present a certificate
 ```
 
  * without TLS support:
@@ -175,19 +175,21 @@ To compile `nc` with `TLS` support, build with `make USE_TLS=y`._
 
 The `-e` or `--encrypt` flag must be passed to enable `TLS` encryption.
 The command line needs to then be further complemented with other suitable
-options dependening on the mode of authentication: `PSK`, public
-certificate, or _no authentication_.
+options dependening on the mode of authentication: `PSK` or public
+certificate.
 
 #### PSK authentication
 
 PSK or `pre-shared key` authentication, as the name implies, entails
 the client and server both using the a key that is shared in advance.
 The key is verified/validated simply by the fact that it is what the
-peer expects (if indeed it is).
+peer expects (if indeed it is). Both client and server use the same
+exact `PSK`.
 
-To use `PSK`, the `-p` or `--psk` flag may be used. The argument is
+To use `PSK`, the `-p` or `--psk` flag must be specified. The argument is
 either the psk key to use or, if `--psk-from-file` is passed, the name
-of a file to read the psk _from_.
+of a file to read the psk _from_. The length of the PSK must be a
+multiple of 2 and is expected to be a hexadecimal string.
 
 PSK is inherently less secure than certificate-based authentication,
 but it can be _much_ more convenient (read _easy_/inexpensive), as seen next.
@@ -196,9 +198,10 @@ but it can be _much_ more convenient (read _easy_/inexpensive), as seen next.
 
 If the `-c` or `--cert` flag is passed instead, the specified
 certificate will be used for authentication with the peer. _Both_
-client and server authenticate each other and therefore each must
-specify a certificate. For simple setups the certificates can be one
-and the same -- or they may be different, for more security.
+client and server authenticate each other in `nc` when TLS is used
+and therefore each must specify a certificate. For simple setups the
+certificates can be oneand the same -- or they may be different, for
+more security.
 
 This is more secure but can be much lots less straightforward than
 PSK. Specifically, `self-signed` certificates are considered insecure
@@ -220,22 +223,96 @@ scope of this `README`.
 Of course, certificates of standard well-known CAs come preinstalled
 on most systems, so the user in that case need not do anything.
 
-#### No authentication
+#### Skip certificate verification
 
-Finally the insecure method: if authentication cannot be set up either
-via `PSK` or certificate exchange, then encryption can still be used
-without any authentication at all. The implications are obvious: the
-peer is unauthenticated so there's the risk the data being sent,
-unknowingly, to an incorrect host. With this said, `nc` is a small
-application the user typically runs informally on hosts in the same
-network, so the (in)security aspect of it may be overstated.
-Encryption is often completely unnecessary.
+Finally the insecure method: if certificate authentication just can't
+seem to be set up, passing the `--noverify` flag will make it so
+certificate verification is skipped. What this means exactly is:
+ * the certificate presented by the server is verified but if
+   verification fails the TLS handshake still proceeds
+ * the server does NOT expect the client to authenticate itself with a
+   certificate so the client never presents one.
 
-### Examples
+Note the following points:
+ * a certificate and key must still be passed at the command line for both
+   client and server
+ * the certificate and key must still be valid format-wise. I.e. the
+   certificate must still be a valid, parsable `PEM` certificate, for
+   example. It's just that if the verification fails e.g. because it
+   is not signed by a trusted authority, this will not terminate the
+   handshake.
 
+### nc TLS examples
+
+ * send data from client to string with certificate authentication
+   _disabled_, over ipv6, in debug mode
+```sh
+# server
+└─$ nc -del --cert ~/tls_certs/test_srv.crt -k ~/tls_certs/test_srv.key --noverify ::1 4444
+ ~ Setting up TLS encryption
+ ~ using certificate-based authentication
+ ~ certificate verification will be skipped (insecure!)
+ ~ Looking to accept() incoming TLS connection request
+ ~ Transferring data over TLS
+some random string
+
+# client
+└─$ echo "some random string" | ./out/nc -de -c ~/tls_certs/test_client.crt -k ~/tls_certs/test_client.key --noverify ::1 4444
+ ~ Setting up TLS encryption
+ ~ using certificate-based authentication
+ ~ certificate verification will be skipped (insecure!)
+ ~ Looking to connect(): initiating connection request with TLS server
+ ~ Transferring data over TLS
+```
+
+ * send contents of secret.txt over Ipv4 TLS, with certificate verification _enabled_
+```sh
+# server
+└─$ nc -el --cert ~/tls_certs/test_srv.crt -k ~/tls_certs/test_srv.key --noverify 127.0.0.1 4444
+
+# client
+└─$ nc -e -c ~/tls_certs/test_client.crt -k ~/tls_certs/test_client.key -f secret.txt 127.0.0.1 4444
+```
+
+ * send contents of secret.txt over IPv4 TLS, using command-line specified PSK key, in debug mode
+```sh
+# server
+└─$ nc -del -p 123456 127.0.0.1 4444
+ ~ Setting up TLS encryption
+ ~ using PSK authentication
+ ~ Looking to accept() incoming TLS connection request
+ ~ running psk_server_cb()
+ ~ PSK identity received from the client with length 12: 'static_ident'
+ ~ PSK client identity successfully validated.
+ ~ Returning PSK length=3
+ ~ Transferring data over TLS
+
+# client
+└─$ nc -de -p 123456 -f secret.txt 127.0.0.1 4444
+ ~ Setting up TLS encryption
+ ~ using PSK authentication
+ ~ Looking to connect(): initiating connection request with TLS server
+ ~ running psk_client_cb()
+ ~ no PSK identity hint provided by the server (none expected)
+ ~ successfully set PSK identity: 'static_ident' of length 12
+ ~ Returning PSK length=3
+ ~ Transferring data over TLS
+```
+
+ * send contents of secret.key over IPv4 TLS, using PSK key read from file
+```sh
+# generate longer, more secure PSK key (512 hex digits = 256 bytes)
+openssl rand -out psk.txt -hex 512
+
+# server
+nc -el -p psk.txt --psk-from-file 127.0.0.1 4444
+
+# client
+nc -e -p psk.txt --psk-from-file -f secret.txt 127.0.0.1 4444
+```
 
 ## TODOs
  - make project compilable with different openssl versions; use
    `OPENSSL_VERSION_NUMBER` to distinguish between openssl versions
  - set reuseaddr sock option to allow immediate binding
- - add tls examples
+
