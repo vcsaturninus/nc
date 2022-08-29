@@ -3,7 +3,7 @@
 
 #ifdef USE_TLS     /* empty if TLS not used */
 
-extern int DEBUG_; /* defined in nc.c */
+extern int DEBUG_;               /* defined in nc.c */
 
 char *CERT_PATH     = NULL;
 char *PRIV_KEY_PATH = NULL;
@@ -51,6 +51,7 @@ static unsigned int psk_srv_cb(SSL *ssl, const char *identity,
     if (!key) {
         exit_print("Fatal: failed to convert PSK key '%s' to buffer\n", PSKEY);
     }
+
     if (klen > (int)max_psk_len) {
         OPENSSL_free(key);
         exit_print("Fatal: psk buffer in psk callback too small (%u) to fit the pre-shared key(%ld)\n", max_psk_len, klen);
@@ -83,11 +84,12 @@ static unsigned int psk_client_cb(SSL *ssl, const char *hint, char identity[],
     long klen          = 0;
     unsigned char *key = NULL;
 
-    say(DEBUG_, " ~ running psk_server_cb()\n");
+    say(DEBUG_, " ~ running psk_client_cb()\n");
     if (!hint) {
         say(DEBUG_, " ~ no PSK identity hint provided by the server (none expected)\n");
+    }else{
+        say(DEBUG_, " ~ PSK identity hint received from the server: '%s'\n", hint);
     }
-    say(DEBUG_, " ~ PSK identity hint received from the server: '%s'", hint);
 
     /*
      * lookup PSK identity and PSK key based on the given identity hint here
@@ -103,7 +105,6 @@ static unsigned int psk_client_cb(SSL *ssl, const char *hint, char identity[],
     if (!key) {
         exit_print("Fatal: failed to convert PSK key '%s' to buffer\n", PSKEY);
     }
-    printf("converted '%s' to '%s'\n", PSKEY, key);
 
     if (max_psk_len > INT_MAX || klen > (long)max_psk_len) {
         OPENSSL_free(key);
@@ -131,6 +132,8 @@ static unsigned int psk_client_cb(SSL *ssl, const char *hint, char identity[],
  */
 int verify_callback(int preverify, X509_STORE_CTX *x509_ctx)
 {
+    if (preverify > 0) return preverify;   /* no errors */
+
     /* 0 would be the end certificate, 1 its CA signer cert etc */
     int depth = X509_STORE_CTX_get_error_depth(x509_ctx);
     int errc  = X509_STORE_CTX_get_error(x509_ctx);
@@ -165,30 +168,52 @@ SSL_CTX *get_ssl_ctx(void){
     return ctx;
 }
 
-void configure_ssl_ctx(bool srv, enum auth_mode auth, SSL_CTX *ctx){
-    if (srv){
-        SSL_CTX_set_psk_server_callback(ctx, psk_srv_cb);
-    }else{
-        SSL_CTX_set_psk_client_callback(ctx, psk_client_cb);
+void configure_ssl_ctx(bool srv, enum auth_mode auth, bool skip_cert_verify, SSL_CTX *ctx)
+{
+    if (auth == PSK_AUTH){
+        say(DEBUG_, " ~ using PSK authentication\n");
+        if (srv){
+            SSL_CTX_set_psk_server_callback(ctx, psk_srv_cb);
+        }else{
+            SSL_CTX_set_psk_client_callback(ctx, psk_client_cb);
+        }
     }
 
-    /* specify private key and certificate to use */
-    if (SSL_CTX_use_certificate_file(ctx, CERT_PATH, OPENSSL_CERT_TYPE) != 1){
-        ERR_print_errors_fp(stderr);
-        exit_print("Failed to configure ssl context\n");
-    }
-    if (SSL_CTX_use_PrivateKey_file(ctx, PRIV_KEY_PATH, OPENSSL_CERT_TYPE) != 1){
-        ERR_print_errors_fp(stderr);
-        exit_print("Failed to configure ssl context");
-    }
+    else if (auth == CERT_AUTH){
+        say(DEBUG_, " ~ using certificate-based authentication\n");
+        /* specify private key and certificate to use */
+        if (SSL_CTX_use_certificate_file(ctx, CERT_PATH, OPENSSL_CERT_TYPE) != 1){
+            ERR_print_errors_fp(stderr);
+            exit_print("Failed to configure ssl context\n");
+        }
+        if (SSL_CTX_use_PrivateKey_file(ctx, PRIV_KEY_PATH, OPENSSL_CERT_TYPE) != 1){
+            ERR_print_errors_fp(stderr);
+            exit_print("Failed to configure ssl context\n");
+        }
 
-    /* unconditionally set SSL_VERIFY_PEER: both client and server will verify each other */
-    SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, verify_callback); // no diagnostics provided
+        if (skip_cert_verify){
+            say(DEBUG_, " ~ certificate verification will be skipped (insecure!)\n");
+            /* forgo certificate verification: 1) client will NOT send a certificate
+             * (server will not ask it to) and 2) server sends a certificate but the TLS
+             * handshake continues regardless of the verification outcome for the server's
+             * certificate. Note that even though the client need not present a
+             * certificate anymore, it's simpler to keep the `nc` cli consistent so a
+             * certificate and key still need to be specified even for the client even if
+             * --noverify is specified; that means these functions still get called and
+             *  therefore the client cert, just like the server cert, although it does not
+             *  get 'verified' for trustworthiness, it still gets checked for format correctness
+             *  and therefore it must still be valid format-wise. */
+            SSL_CTX_set_verify(ctx, SSL_VERIFY_NONE, NULL);
+        }else{
+            /* unconditionally set SSL_VERIFY_PEER: both client and server will verify each other */
+            SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, verify_callback); // no diagnostics provided
+        }
 
-    /* find CA cert anchor in system trust store */
-    if (SSL_CTX_set_default_verify_paths(ctx) != 1){
-        ERR_print_errors_fp(stderr);
-        exit_print("Failed to verify locations\n");
+        /* find CA cert anchor in system trust store */
+        if (SSL_CTX_set_default_verify_paths(ctx) != 1){
+            ERR_print_errors_fp(stderr);
+            exit_print("Failed to verify locations\n");
+        }
     }
 }
 

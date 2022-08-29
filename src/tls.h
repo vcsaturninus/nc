@@ -19,7 +19,7 @@
  * 1) no authentication i.e. authentication disabled
  * 2) certificate-based authentication
  * 3) authentication based on pre-shared key */
-enum auth_mode { NO_AUTH, CERT_AUTH, PSK_AUTH };
+enum auth_mode { CERT_AUTH=1, PSK_AUTH=2 };
 
 /* for certificate-based auth */
 extern char *CERT_PATH;
@@ -32,6 +32,6 @@ extern char *PSKEY;
 SSL_CTX *get_ssl_ctx(void);
 
 /* configure SSL context either for server (srv=true) or client (!src) */
-void configure_ssl_ctx(bool srv, enum auth_mode auth, SSL_CTX *ctx);
+void configure_ssl_ctx(bool srv, enum auth_mode auth, bool skip_cert_verify, SSL_CTX *ctx);
 
 #endif

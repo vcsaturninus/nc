@@ -86,13 +86,13 @@ int main(int argc, char *argv[]){
     UNUSED(file);        /* silence unused warning (if unspecified) */
 
 #ifdef USE_TLS
-    enum auth_mode auth = 0;
-    int TLS_ENCRYPT     = 0;            /* flag to enable TLS encryption */
-    int PSK_MODE        = 0;            /* auth modes are mutually exclusive */
-    int CERT_MODE       = 0;
-    int NO_TLS_AUTH     = 0;
+    enum auth_mode auth      = 0;
+    int TLS_ENCRYPT          = 0;         /* flag to enable TLS encryption */
+    int PSK_MODE             = 0;         /* auth modes are mutually exclusive */
+    int CERT_MODE            = 0;
+    int NO_CERT_VERIFICATION = 0;         /* disregard TLS certificate verification */
     int PSK_FROM_FILE   = 0;
-    char psk__[MAX_PSK_LEN+1] = {0};  /* to store the PSK IFF PSK_FROM_FILE is true */
+    char psk__[MAX_PSK_LEN+1] = {0};      /* to store the PSK IFF PSK_FROM_FILE is true */
 
     SSL_CTX *ssl_ctx = NULL;
     SSL     *ssl     = NULL;
@@ -116,7 +116,7 @@ int main(int argc, char *argv[]){
     {"key", required_argument, NULL, 'k'},
     {"psk", required_argument, NULL, 'p'},
     {"psk-from-file", no_argument, &PSK_FROM_FILE, 1},
-    {"noauth", no_argument, &NO_TLS_AUTH, 1},
+    {"noverify", no_argument, &NO_CERT_VERIFICATION, 1},
 #endif
     {"debug", no_argument, NULL, 'd'},
     {"file", required_argument, NULL, 'f'},
@@ -187,21 +187,29 @@ int main(int argc, char *argv[]){
         exit_print("Invalid cli configuration: encryption can only be used with Internet sockets\n");
     }
 
-    if (PSK_MODE + CERT_MODE + NO_TLS_AUTH > 1){
-        exit_print("Invalid cli configuration: certificate, PSK, and noauth modes are mutually exclusive\n");
+    if (PSK_MODE && CERT_MODE){
+        exit_print("Invalid cli configuration: certificate and PSK modes are mutually exclusive\n");
     }
 
     if (CERT_MODE && (!PRIV_KEY_PATH || !CERT_PATH)){
         exit_print("Invalid cli configuration: certificate mode requires certificate and private key\n");
     }
 
-    if (TLS_ENCRYPT && !(CERT_MODE || PSK_MODE || NO_TLS_AUTH)){
-        exit_print("Invalid cli configuration: TLS mode (-e) requires either certificate, PSK, or noauth mode\n");
+    if (TLS_ENCRYPT && !(CERT_MODE || PSK_MODE)){
+        exit_print("Invalid cli configuration: TLS mode (-e) requires either certificate or PSK authentication\n");
+    }
+
+    if (PSK_FROM_FILE && (!TLS_ENCRYPT && !PSK_MODE)){
+        exit_print("Invalid cli configuration: '--psk-from-file' requires PSK TLS authentication\n");
+    }
+
+    if (NO_CERT_VERIFICATION && (!TLS_ENCRYPT && !CERT_MODE)){
+        exit_print("Invalid cli configuration: '--no-cert-verify' requires Certificate TLS authentication\n");
     }
 
     if (TLS_ENCRYPT){
         /* set authentication mode */
-        auth = NO_TLS_AUTH ? NO_AUTH : PSK_MODE ? PSK_AUTH : CERT_AUTH;
+        auth = PSK_MODE ? PSK_AUTH : CERT_AUTH;
 
         /* if PSK_FROM_FILE is true, then PSKEY is not a key,
          * but a path to read the key from */
@@ -220,7 +228,7 @@ int main(int argc, char *argv[]){
             /* strip trailing newline, if any */
             char *nl = strchr(PSKEY, '\n');
             if (nl) *nl = '\0';
-            say(DEBUG_, "READ PSK from file: '%s'", PSKEY);
+            say(DEBUG_, "Read PSK from file: '%s'\n", PSKEY);
         }
 
         /* initialize openssl lib internals */
@@ -376,7 +384,7 @@ int main(int argc, char *argv[]){
                     perror("Failed to change signal disposition");
                     exit(EXIT_FAILURE);
                 }
-                configure_ssl_ctx(true, auth, ssl_ctx);
+                configure_ssl_ctx(true, auth, NO_CERT_VERIFICATION ? true: false, ssl_ctx);
                 ssl = SSL_new(ssl_ctx);   /* SSL session object */
                 SSL_set_fd(ssl, connsock);
 
@@ -441,15 +449,17 @@ int main(int argc, char *argv[]){
             if (TLS_ENCRYPT){
                 say(DEBUG_, " ~ Setting up TLS encryption \n");
                 ssl_ctx = get_ssl_ctx();
-                configure_ssl_ctx(false, auth, ssl_ctx);
+                configure_ssl_ctx(false, auth, NO_CERT_VERIFICATION ? true : false, ssl_ctx);
                 ssl = SSL_new(ssl_ctx);
                 SSL_set_fd(ssl, sd);
 
+                say(DEBUG_, " ~ Looking to connect(): initiating connection request with TLS server\n");
                 if (SSL_connect(ssl) != 1){
                     ERR_print_errors_fp(stderr);
                     exit_print("Failure when initiating TLS handshake\n");
                 }
 
+                say(DEBUG_, " ~ Transferring data over TLS\n");
                 rc = ssl_transfer(input, sd, BUFFER_SIZE, ssl, TO_SSL);
 
                 SSL_shutdown(ssl);
@@ -508,7 +518,7 @@ void show_usage(char **argv){
 "SYNOPSYS:\n"
 "  IPv4/IPv6:           "
 #ifdef USE_TLS
-"[-hdel][-f FILE][[--noauth]|[-c CERT][-k KEY]|[-p PSK][--psk-from-file]] <ADDRESS> <PORT>\n"
+"[-hdel][-f FILE][[-c CERT][-k KEY][--noverify]|[-p PSK][--psk-from-file]] <ADDRESS> <PORT>\n"
 #else
 "[-hdl][-f FILE] <ADDRESS> <PORT>\n"
 #endif
@@ -527,7 +537,7 @@ void show_usage(char **argv){
 " -k|--key KEY_PATH     indicate private key associated with the certificate specified\n"
 " -p|--psk PSK          use specified PSK for TLS authentication\n"
 "    --psk-from-file    the PSK argument to -p is not the psk itself but a file containing the psk\n"
-"    --noauth           use TLS encryption but do NOT authenticate via certificate or PSK\n"
+"    --noverify         skip verification of the certificate presented by the server; client need not present a certificate\n"
 #endif
 
 "\n\n See https://github.com/vcsaturninus/nc FMI.\n",
